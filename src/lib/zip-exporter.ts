@@ -71,11 +71,13 @@ export async function createBatchZip({
   documents,
   report,
   includeFolders = true,
+  printableA4IdSheetBytes,
 }: {
   eventName: string;
   documents: GeneratedDocument[];
   report: GenerationReport;
   includeFolders?: boolean;
+  printableA4IdSheetBytes?: Uint8Array;
 }): Promise<Blob> {
   const zip = new JSZip();
   const rootFolderName = sanitizeFilename(eventName || 'EventKit_Export');
@@ -109,6 +111,12 @@ export async function createBatchZip({
     usedPaths.add(fullPath);
 
     folder.file(finalFilename, doc.pdfBytes);
+  }
+
+  // If printable A4 ID sheet is supplied, add it directly to ID-Cards folder
+  if (printableA4IdSheetBytes) {
+    const idFolder = includeFolders ? root.folder('ID-Cards') || root : root;
+    idFolder.file('A4_Printable_ID_Cards_All.pdf', printableA4IdSheetBytes);
   }
 
   // Add reports folder

@@ -21,11 +21,15 @@ import {
   FolderTree,
   ChevronRight,
   Sparkles,
+  Printer,
+  Grid,
+  Scissors,
 } from 'lucide-react';
 import { isParticipantEligibleForDoc } from '../../lib/rule-engine';
 import {
   generateCertificateId,
   buildDocumentFilename,
+  sanitizeFilename,
 } from '../../lib/template-engine';
 import { renderSingleDocument, createPdfBlobUrl } from '../../lib/pdf-renderer';
 import {
@@ -34,6 +38,7 @@ import {
   triggerFileDownload,
   getCategorySubfolder,
 } from '../../lib/zip-exporter';
+import { imposeCardsOnA4Sheets } from '../../lib/sheet-imposer';
 
 export interface Step8Props {
   project: EventProject;
@@ -50,6 +55,13 @@ export const Step8GenerationAndExport: React.FC<Step8Props> = ({ project, onBack
   const [isZipping, setIsZipping] = useState(false);
   const [selectedPreviewDoc, setSelectedPreviewDoc] = useState<GeneratedDocument | null>(null);
   const [previewPdfUrl, setPreviewPdfUrl] = useState<string | null>(null);
+
+  // Multi-card A4 imposition state
+  const [impositionGridRows, setImpositionGridRows] = useState<number>(4); // 4 = 8 cards (2x4), 5 = 10 cards (2x5)
+  const [impositionShowCropMarks, setImpositionShowCropMarks] = useState<boolean>(true);
+  const [isGeneratingA4Sheet, setIsGeneratingA4Sheet] = useState<boolean>(false);
+  const [a4SheetPreviewUrl, setA4SheetPreviewUrl] = useState<string | null>(null);
+  const [isA4SheetPreviewModalOpen, setIsA4SheetPreviewModalOpen] = useState<boolean>(false);
 
   const cancelFlagRef = useRef(false);
 
@@ -247,11 +259,33 @@ export const Step8GenerationAndExport: React.FC<Step8Props> = ({ project, onBack
     if (!report || generatedDocs.length === 0) return;
     setIsZipping(true);
     try {
+      // Check if there are generated ID cards to bundle into A4 printable sheet
+      const idCardDocs = generatedDocs.filter(
+        d => d.documentCategory === 'id_card' && d.status === 'success' && d.pdfBytes
+      );
+      let printableA4IdSheetBytes: Uint8Array | undefined = undefined;
+      if (idCardDocs.length > 0) {
+        try {
+          const sheetResult = await imposeCardsOnA4Sheets(
+            idCardDocs.map(d => d.pdfBytes!),
+            {
+              columns: 2,
+              rows: impositionGridRows,
+              showCropMarks: impositionShowCropMarks,
+            }
+          );
+          printableA4IdSheetBytes = sheetResult.pdfBytes;
+        } catch (sheetErr) {
+          console.warn('Could not compile printable A4 ID sheet for ZIP:', sheetErr);
+        }
+      }
+
       const zipBlob = await createBatchZip({
         eventName: project.metadata.name,
         documents: generatedDocs,
         report,
         includeFolders: project.settings.zipBatchFolderStructure,
+        printableA4IdSheetBytes,
       });
 
       const zipFilename = `${project.metadata.name.replace(/\s+/g, '_')}_Documents.zip`;
@@ -261,6 +295,67 @@ export const Step8GenerationAndExport: React.FC<Step8Props> = ({ project, onBack
       alert('Error creating ZIP archive.');
     } finally {
       setIsZipping(false);
+    }
+  };
+
+  // Download Printable A4 ID Sheet
+  const handleDownloadPrintableA4Sheet = async () => {
+    const idCardDocs = generatedDocs.filter(
+      d => d.documentCategory === 'id_card' && d.status === 'success' && d.pdfBytes
+    );
+    if (idCardDocs.length === 0) {
+      alert('No generated ID cards found to compile into an A4 sheet.');
+      return;
+    }
+
+    setIsGeneratingA4Sheet(true);
+    try {
+      const result = await imposeCardsOnA4Sheets(
+        idCardDocs.map(d => d.pdfBytes!),
+        {
+          columns: 2,
+          rows: impositionGridRows,
+          showCropMarks: impositionShowCropMarks,
+        }
+      );
+
+      const filename = `${sanitizeFilename(project.metadata.name)}_Printable_A4_ID_Cards_${result.totalCards}_Badges.pdf`;
+      triggerFileDownload(result.pdfBytes, filename, 'application/pdf');
+    } catch (err: any) {
+      console.error('Failed to generate printable A4 sheet:', err);
+      alert(`Failed to generate printable A4 sheet: ${err?.message || 'Unknown error'}`);
+    } finally {
+      setIsGeneratingA4Sheet(false);
+    }
+  };
+
+  // Preview Printable A4 ID Sheet
+  const handlePreviewPrintableA4Sheet = async () => {
+    const idCardDocs = generatedDocs.filter(
+      d => d.documentCategory === 'id_card' && d.status === 'success' && d.pdfBytes
+    );
+    if (idCardDocs.length === 0) return;
+
+    setIsGeneratingA4Sheet(true);
+    try {
+      const result = await imposeCardsOnA4Sheets(
+        idCardDocs.map(d => d.pdfBytes!),
+        {
+          columns: 2,
+          rows: impositionGridRows,
+          showCropMarks: impositionShowCropMarks,
+        }
+      );
+
+      if (a4SheetPreviewUrl) URL.revokeObjectURL(a4SheetPreviewUrl);
+      const url = createPdfBlobUrl(result.pdfBytes);
+      setA4SheetPreviewUrl(url);
+      setIsA4SheetPreviewModalOpen(true);
+    } catch (err: any) {
+      console.error('Failed to preview printable A4 sheet:', err);
+      alert(`Failed to preview A4 sheet: ${err?.message || 'Unknown error'}`);
+    } finally {
+      setIsGeneratingA4Sheet(false);
     }
   };
 
@@ -397,6 +492,100 @@ export const Step8GenerationAndExport: React.FC<Step8Props> = ({ project, onBack
             </div>
           </div>
 
+          {/* Printable A4 ID Card Sheets Imposition Section */}
+          {generatedDocs.some(d => d.documentCategory === 'id_card' && d.status === 'success') && (
+            <div className="bg-gradient-to-br from-indigo-50/90 via-white to-purple-50/70 rounded-2xl border border-indigo-200 p-6 shadow-xs space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="flex items-start gap-3.5">
+                  <div className="w-10 h-10 rounded-xl bg-indigo-600 text-white flex items-center justify-center shadow-xs flex-shrink-0 mt-0.5">
+                    <Printer className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 mb-1">
+                      <h4 className="text-base font-bold text-slate-900">
+                        Printable A4 ID Card Sheets (Multi-Card Grid)
+                      </h4>
+                      <Badge variant="indigo" size="sm">
+                        {
+                          generatedDocs.filter(
+                            d => d.documentCategory === 'id_card' && d.status === 'success'
+                          ).length
+                        }{' '}
+                        Cards
+                      </Badge>
+                    </div>
+                    <p className="text-xs text-slate-600 leading-relaxed max-w-xl">
+                      Save paper and printing costs by imposing all attendee ID badges into a ready-to-print multi-card A4 sheet with cutting guidelines.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    icon={<Eye className="w-3.5 h-3.5" />}
+                    onClick={handlePreviewPrintableA4Sheet}
+                    loading={isGeneratingA4Sheet}
+                  >
+                    Preview A4 Sheet
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    icon={<Printer className="w-3.5 h-3.5" />}
+                    onClick={handleDownloadPrintableA4Sheet}
+                    loading={isGeneratingA4Sheet}
+                  >
+                    Download Printable A4 Sheet
+                  </Button>
+                </div>
+              </div>
+
+              {/* Grid Layout Configuration */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-3 border-t border-indigo-100 text-xs">
+                <div className="flex items-center gap-2">
+                  <Grid className="w-4 h-4 text-indigo-600 flex-shrink-0" />
+                  <span className="font-semibold text-slate-700">Grid Layout:</span>
+                  <select
+                    value={impositionGridRows}
+                    onChange={e => setImpositionGridRows(Number(e.target.value))}
+                    className="bg-white border border-slate-300 rounded-lg px-2.5 py-1 text-xs font-medium focus:ring-1 focus:ring-indigo-500"
+                  >
+                    <option value={4}>8 Cards per Page (2×4 Standard)</option>
+                    <option value={5}>10 Cards per Page (2×5 Compact)</option>
+                  </select>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Scissors className="w-4 h-4 text-indigo-600 flex-shrink-0" />
+                  <label className="flex items-center gap-2 cursor-pointer font-medium text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={impositionShowCropMarks}
+                      onChange={e => setImpositionShowCropMarks(e.target.checked)}
+                      className="rounded text-indigo-600 focus:ring-indigo-500 h-3.5 w-3.5"
+                    />
+                    <span>Include Dotted Crop Lines & Cut Marks</span>
+                  </label>
+                </div>
+
+                <div className="text-slate-500 sm:text-right font-medium">
+                  Estimated Sheet Count:{' '}
+                  <strong className="text-indigo-700">
+                    {Math.ceil(
+                      generatedDocs.filter(
+                        d => d.documentCategory === 'id_card' && d.status === 'success'
+                      ).length /
+                        (2 * impositionGridRows)
+                    )}{' '}
+                    A4 Page(s)
+                  </strong>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Generated Documents List */}
           <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
             <div className="p-4 border-b border-slate-200 bg-slate-50/50 flex items-center justify-between">
@@ -502,6 +691,54 @@ export const Step8GenerationAndExport: React.FC<Step8Props> = ({ project, onBack
               src={previewPdfUrl}
               title="PDF preview"
               className="w-full h-[600px] rounded-xl border border-slate-200"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Printable A4 Sheet Preview Modal */}
+      {isA4SheetPreviewModalOpen && a4SheetPreviewUrl && (
+        <div className="fixed inset-0 z-50 overflow-y-auto flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
+          <div className="bg-white rounded-2xl w-full max-w-4xl p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2.5">
+                <Printer className="w-5 h-5 text-indigo-600" />
+                <div>
+                  <h3 className="text-base font-bold text-slate-900">
+                    Printable A4 ID Cards Sheet Preview
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    {2 * impositionGridRows} cards per page with scissor crop marks • Standard A4 portrait
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="primary"
+                  icon={<Download className="w-3.5 h-3.5" />}
+                  onClick={handleDownloadPrintableA4Sheet}
+                >
+                  Download PDF Sheet
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    setIsA4SheetPreviewModalOpen(false);
+                    if (a4SheetPreviewUrl) URL.revokeObjectURL(a4SheetPreviewUrl);
+                    setA4SheetPreviewUrl(null);
+                  }}
+                >
+                  Close
+                </Button>
+              </div>
+            </div>
+
+            <iframe
+              src={a4SheetPreviewUrl}
+              title="A4 Sheet Preview"
+              className="w-full h-[620px] rounded-xl border border-slate-200"
             />
           </div>
         </div>
